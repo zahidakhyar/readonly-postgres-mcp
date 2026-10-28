@@ -42,6 +42,12 @@ describe.skipIf(!url)("runReadonly against Postgres", () => {
 		);
 	});
 
+	it("rejects quickly when the connection is dropped mid-query", async () => {
+		const started = Date.now();
+		await expect(run("select pg_terminate_backend(pg_backend_pid())")).rejects.toThrow(/^Query failed: /);
+		expect(Date.now() - started).toBeLessThan(3_000);
+	}, 15_000);
+
 	it("rejects multiple statements", async () => {
 		await expect(run("select 1; select 2")).rejects.toThrow(/^Query failed: .*multiple commands/);
 	});

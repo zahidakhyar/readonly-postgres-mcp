@@ -1,5 +1,4 @@
-import { Client } from "pg";
-import Cursor from "pg-cursor";
+import { Client, Query, type QueryConfig } from "pg";
 
 export const MAX_SQL_LENGTH = 16000;
 export const MAX_ROWS = 5000;
@@ -7,6 +6,11 @@ const STATEMENT_TIMEOUT = "10s";
 const CONNECT_TIMEOUT_MS = 5000;
 
 export type QueryResult = { rows: Record<string, unknown>[]; rowCount: number };
+
+type Row = Record<string, unknown>;
+// Not in @types/pg: pg's Query reads queryMode, and Client keeps its socket on connection.stream.
+type ExtendedQueryConfig = QueryConfig & { queryMode: "extended" };
+type ClientWithStream = Client & { connection: { stream: { destroy(): void } } };
 
 export class UserFacingError extends Error {}
 
@@ -30,6 +34,8 @@ export async function runReadonly(
 ): Promise<QueryResult> {
 	validateSql(sql);
 	const client = new Client({ connectionString, connectionTimeoutMillis: CONNECT_TIMEOUT_MS });
+	// The socket is destroyed on purpose at the row cap, and Hyperdrive can drop it too; an unhandled error event crashes the isolate.
+	client.on("error", () => undefined);
 	try {
 		await client.connect();
 	} catch {
@@ -39,12 +45,33 @@ export async function runReadonly(
 		await client.query("BEGIN READ ONLY");
 		await client.query(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`);
 		// Extended protocol makes Postgres reject more than one statement.
-		const cursor = client.query(new Cursor<Record<string, unknown>>(sql));
-		// One row past the cap is enough for shapeResult to reject; reading further would buffer it all.
-		const rows = await cursor.read(MAX_ROWS + 1);
-		// An open portal would make ROLLBACK wait behind it. Not closed after a failed read: the error already
-		// sent Sync, ROLLBACK drops the portal, and on a dropped connection close() waits forever for readyForQuery.
-		await cursor.close();
+		// No portal row limit or cursor: Hyperdrive drops the connection on PortalSuspended and on named portals.
+		const config: ExtendedQueryConfig = { text: sql, queryMode: "extended" };
+		const query = client.query(new Query<Row>(config));
+		const rows = await new Promise<Row[]>((resolve, reject) => {
+			const collected: Row[] = [];
+			let settled = false;
+			query.on("row", (row) => {
+				if (settled) return;
+				collected.push(row);
+				// One row past the cap is enough for shapeResult to reject; reading further would buffer it all.
+				if (collected.length > MAX_ROWS) {
+					settled = true;
+					(client as ClientWithStream).connection.stream.destroy();
+					resolve(collected);
+				}
+			});
+			query.on("end", () => {
+				if (settled) return;
+				settled = true;
+				resolve(collected);
+			});
+			query.on("error", (error) => {
+				if (settled) return;
+				settled = true;
+				reject(error);
+			});
+		});
 		return shapeResult(rows);
 	} catch (error) {
 		if (error instanceof UserFacingError) throw error;
