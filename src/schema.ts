@@ -5,6 +5,7 @@ const READABLE_RELATION = `
 	and n.nspname not in ('pg_catalog', 'information_schema')
 	and n.nspname not like 'pg\\_toast%'
 	and n.nspname not like 'pg\\_temp%'
+	and has_schema_privilege(n.oid, 'USAGE')
 	and (
 		has_table_privilege(c.oid, 'SELECT')
 		or exists (
@@ -88,4 +89,12 @@ select
 	) as "foreignKeys"
 from pg_class c
 join pg_namespace n on n.oid = c.relnamespace
-where c.oid = to_regclass($1::text) and ${READABLE_RELATION}`;
+where c.oid = (
+	-- to_regclass raises "permission denied for schema" on a qualified name in a schema without USAGE.
+	select to_regclass($1::text)
+	from parse_ident($1::text) as ident
+	where cardinality(ident) = 1 or exists (
+		select 1 from pg_namespace un
+		where un.nspname = ident[cardinality(ident) - 1] and has_schema_privilege(un.oid, 'USAGE')
+	)
+) and ${READABLE_RELATION}`;

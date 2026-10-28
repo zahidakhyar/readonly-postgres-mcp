@@ -4,6 +4,7 @@ import { describeSchemaTool } from "../src/tools";
 
 const url = process.env.TEST_DATABASE_URL;
 const SCHEMA = "sqlmcp_schema_test";
+const NO_USAGE_SCHEMA = "sqlmcp_schema_nousage";
 const ROLE = "sqlmcp_reader";
 
 async function admin(sql: string): Promise<void> {
@@ -27,6 +28,7 @@ describe.skipIf(!url)("describeSchemaTool against Postgres", () => {
 	beforeAll(async () => {
 		await admin(`
 			drop schema if exists ${SCHEMA} cascade;
+			drop schema if exists ${NO_USAGE_SCHEMA} cascade;
 			drop role if exists ${ROLE};
 			create schema ${SCHEMA};
 			create table ${SCHEMA}.customers (id int primary key, name text not null, email text);
@@ -42,11 +44,14 @@ describe.skipIf(!url)("describeSchemaTool against Postgres", () => {
 			grant usage on schema ${SCHEMA} to ${ROLE};
 			grant select (id, name) on ${SCHEMA}.customers to ${ROLE};
 			grant select on ${SCHEMA}.orders to ${ROLE};
+			create schema ${NO_USAGE_SCHEMA};
+			create table ${NO_USAGE_SCHEMA}.t (a int);
+			grant select on ${NO_USAGE_SCHEMA}.t to ${ROLE};
 		`);
 	});
 
 	afterAll(async () => {
-		await admin(`drop schema if exists ${SCHEMA} cascade; drop role if exists ${ROLE};`);
+		await admin(`drop schema if exists ${SCHEMA} cascade; drop schema if exists ${NO_USAGE_SCHEMA} cascade; drop role if exists ${ROLE};`);
 	});
 
 	it("lists only readable tables", async () => {
@@ -86,6 +91,18 @@ describe.skipIf(!url)("describeSchemaTool against Postgres", () => {
 			content: [{ type: "text", text: `Table "${SCHEMA}.secret" not found or not readable` }],
 			isError: true,
 		});
+	});
+
+	it("hides tables in a schema without USAGE", async () => {
+		const listed = (await describeSchema({})).structuredContent?.tables as { schema: string }[];
+		expect(listed.some((t) => t.schema === NO_USAGE_SCHEMA)).toBe(false);
+		expect((await describeSchema({ schema: NO_USAGE_SCHEMA })).structuredContent).toEqual({ tables: [] });
+		for (const table of [`${NO_USAGE_SCHEMA}.t`, `${NO_USAGE_SCHEMA}.missing`]) {
+			expect(await describeSchema({ table })).toEqual({
+				content: [{ type: "text", text: `Table "${table}" not found or not readable` }],
+				isError: true,
+			});
+		}
 	});
 
 	it("does not describe system catalogs or indexes", async () => {
