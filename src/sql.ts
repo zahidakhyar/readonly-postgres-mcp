@@ -35,22 +35,21 @@ export async function runReadonly(
 	} catch {
 		throw new UserFacingError(`Database "${database}" is unreachable`);
 	}
-	let cursor: Cursor<Record<string, unknown>> | undefined;
 	try {
 		await client.query("BEGIN READ ONLY");
 		await client.query(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`);
 		// Extended protocol makes Postgres reject more than one statement.
-		cursor = client.query(new Cursor<Record<string, unknown>>(sql));
+		const cursor = client.query(new Cursor<Record<string, unknown>>(sql));
 		// One row past the cap is enough for shapeResult to reject; reading further would buffer it all.
 		const rows = await cursor.read(MAX_ROWS + 1);
+		// An open portal would make ROLLBACK wait behind it. Not closed after a failed read: the error already
+		// sent Sync, ROLLBACK drops the portal, and on a dropped connection close() waits forever for readyForQuery.
 		await cursor.close();
 		return shapeResult(rows);
 	} catch (error) {
 		if (error instanceof UserFacingError) throw error;
 		throw new UserFacingError(`Query failed: ${(error as Error).message}`);
 	} finally {
-		// An open portal would make ROLLBACK wait behind it.
-		await cursor?.close().catch(() => undefined);
 		await client.query("ROLLBACK").catch(() => undefined);
 		await client.end().catch(() => undefined);
 	}
