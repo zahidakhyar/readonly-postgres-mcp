@@ -1,47 +1,59 @@
 # readonly-postgres-mcp
 
-A remote [MCP](https://modelcontextprotocol.io) server that lets Claude (or any
-MCP client) run read-only SQL against your Postgres databases. It runs as a
-Cloudflare Worker, reaches the databases through
-[Hyperdrive](https://developers.cloudflare.com/hyperdrive/), and only lets in
-the Google accounts you list.
+Let Claude query your Postgres databases, read-only, from a server you own.
 
-I built it to plug production databases into claude.ai as a custom connector,
-so Claude can answer questions and build dashboards from live data through a
-connection that cannot write.
+readonly-postgres-mcp is a remote [MCP](https://modelcontextprotocol.io)
+server that runs on Cloudflare Workers. Add it to claude.ai (or any MCP client
+that supports OAuth) as a custom connector, and Claude can answer questions
+and build dashboards from live data through a connection that cannot write.
 
-## Security model
+- **Read-only.** Every query runs in a read-only transaction that is always
+  rolled back, one statement at a time.
+- **Private.** Only the Google accounts you list can sign in, and the list is
+  checked on every request.
+- **Cheap to run.** Fits the Cloudflare free plan, with up to 10 databases.
 
-- Only verified Google accounts listed in `ALLOWED_EMAILS` can connect. The
-  list is checked again on every MCP request, so removing an email locks that
-  person out right away, even if they still hold a token.
-- OAuth tokens are bound to the server's URL (`MCP_RESOURCE`), so a token
-  issued here is refused anywhere else, and the reverse. The Google access
-  token is used once to read the email and is not stored.
-- Every query runs inside `BEGIN READ ONLY` and is always rolled back. The
-  extended query protocol makes Postgres reject anything with more than one
-  statement.
-- Queries get a 10s statement timeout and a 5s connect timeout. SQL is capped
-  at 16,000 characters and results at 5,000 rows.
-- The database role decides what Claude can see. Connect each database with a
-  dedicated role that can only read the columns you want exposed (see
-  [Database roles](#database-roles)); treat the guards above as a backstop.
+## How it works
+
+```mermaid
+flowchart LR
+    C[Claude / MCP client] -- OAuth token --> W[Worker /mcp]
+    W -- Google sign-in<br/>+ email allowlist --> G[Google]
+    W -- one read-only<br/>statement --> H[Hyperdrive]
+    H --> P[(Postgres)]
+```
+
+1. The client signs in with Google. The Worker only issues a token if the
+   email is verified and in `ALLOWED_EMAILS`.
+2. Each MCP call is checked against the allowlist again, then the SQL runs
+   through Hyperdrive inside `BEGIN READ ONLY` … `ROLLBACK`.
+3. Rows come back as JSON.
 
 ## Tools
 
-| Tool | Input | Output |
-|------|-------|--------|
+| Tool | Input | Returns |
+|------|-------|---------|
 | `list_databases` | none | `{ databases: string[] }` |
 | `execute_sql_readonly` | `{ database, sql }` | `{ rows, rowCount }` |
 
-Results come back both as JSON text and as `structuredContent`.
+Each query is limited to one statement of up to 16,000 characters, a 10s
+statement timeout and 5,000 result rows. Results come back both as JSON text
+and as `structuredContent`.
 
 ## Setup
 
-You need a Cloudflare account (the free plan works, with up to 10 Hyperdrive
-configs) and a Google Cloud project for the OAuth client.
+You need:
 
-### 1. Install and configure
+- a Cloudflare account (free plan is fine)
+- a Google Cloud project, for the OAuth client
+- Node.js 22 or newer
+- a Postgres role that can read only what Claude should see (see
+  [Database roles](#database-roles))
+
+Below, `<your-subdomain>` is your `workers.dev` subdomain, so the server lives
+at `https://readonly-postgres-mcp.<your-subdomain>.workers.dev`.
+
+### 1. Install
 
 ```bash
 git clone https://github.com/zahidakhyar/readonly-postgres-mcp.git
@@ -51,86 +63,128 @@ cp wrangler.example.jsonc wrangler.jsonc
 npx wrangler kv namespace create readonly-postgres-mcp-oauth
 ```
 
-In `wrangler.jsonc`, paste the KV namespace id from the last command into the
-`OAUTH_KV` binding, and set `MCP_RESOURCE` to the URL clients will connect to
-(`https://readonly-postgres-mcp.<your-subdomain>.workers.dev/mcp`). It must
-match the connector URL exactly, or sign-in fails with `invalid_target`.
-`wrangler.jsonc` is gitignored, so your ids stay out of the repo.
+Then edit `wrangler.jsonc` (it is gitignored, so your ids stay local):
+
+| Field | Set it to |
+|-------|-----------|
+| `kv_namespaces[0].id` | the id printed by the last command |
+| `vars.MCP_RESOURCE` | `https://readonly-postgres-mcp.<your-subdomain>.workers.dev/mcp` |
+
+`MCP_RESOURCE` must be exactly the URL you will add as the connector.
 
 ### 2. Create a Google OAuth client
 
-In Google Cloud Console → APIs & Services → Credentials, create an OAuth
-client of type **Web application** with these redirect URIs:
+In Google Cloud Console, go to APIs & Services → Credentials → Create
+credentials → OAuth client ID, choose **Web application**, and add these
+authorized redirect URIs:
 
-- `https://readonly-postgres-mcp.<your-subdomain>.workers.dev/callback`
-- `http://localhost:8788/callback` (local development)
+```
+https://readonly-postgres-mcp.<your-subdomain>.workers.dev/callback
+http://localhost:8788/callback
+```
 
 ### 3. Set secrets and deploy
 
 ```bash
 npx wrangler secret put GOOGLE_CLIENT_ID
 npx wrangler secret put GOOGLE_CLIENT_SECRET
-npx wrangler secret put COOKIE_ENCRYPTION_KEY   # e.g. openssl rand -hex 32
-npx wrangler secret put ALLOWED_EMAILS          # comma-separated
+openssl rand -hex 32 | npx wrangler secret put COOKIE_ENCRYPTION_KEY
+npx wrangler secret put ALLOWED_EMAILS
 npm run deploy
 ```
 
-Optionally set `HOSTED_DOMAIN` to limit the Google sign-in screen to one
-Google Workspace domain.
+| Secret | Value |
+|--------|-------|
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | from step 2 |
+| `COOKIE_ENCRYPTION_KEY` | random; the command above generates one |
+| `ALLOWED_EMAILS` | comma-separated Google emails, e.g. `alice@example.com,bob@example.com` |
+| `HOSTED_DOMAIN` (optional) | a Google Workspace domain; the sign-in screen then only offers accounts from it. Access is still decided by `ALLOWED_EMAILS`. |
 
-### 4. Add databases
+### 4. Add a database
 
 ```bash
-npm run add-db -- <name> "<postgres connection string>"
-npm run remove-db -- <name>
+npm run add-db -- <name> "postgres://<user>:<password>@<host>:5432/<db>"
 ```
 
-`add-db` creates a Hyperdrive config named `<worker>-<name>` (caching
-disabled), adds an `HD_<NAME>` binding to `wrangler.jsonc`, and redeploys.
-Names are lowercase letters, digits and `_`. The connection string is redacted
-from any error output.
+This creates a Hyperdrive config named `<worker name>-<name>` (caching off),
+adds an `HD_<NAME>` binding to `wrangler.jsonc`, and redeploys. Names use
+lowercase letters, digits and `_`. The connection string never appears in
+error output.
 
-### 5. Connect a client
+To remove one: `npm run remove-db -- <name>`.
 
-In claude.ai, open Settings → Connectors → Add custom connector and enter
-`https://readonly-postgres-mcp.<your-subdomain>.workers.dev/mcp`. Other MCP
-clients that support remote servers with OAuth use the same URL.
+### 5. Connect Claude
+
+In claude.ai, open Settings → Connectors → Add custom connector and enter:
+
+```
+https://readonly-postgres-mcp.<your-subdomain>.workers.dev/mcp
+```
+
+Sign in with an allowed Google account, then ask Claude to call
+`list_databases`.
 
 ## Database roles
 
-Give each database its own read-only role and grant only the columns you
-need. Revoke table-level `SELECT` and default privileges first, **as the table
-owner**, then verify. A `REVOKE` run by the wrong role only prints a warning,
-so the check at the end matters:
+The database role decides what Claude can see; the server's guards are a
+backstop. Give each database its own role and grant only the columns you
+need.
+
+Run this **as the table owner**. A `REVOKE` run by any other role only prints
+a warning and changes nothing, so do the check at the end:
 
 ```sql
 REVOKE SELECT ON ALL TABLES IN SCHEMA public FROM <role>;
 ALTER DEFAULT PRIVILEGES FOR ROLE <owner> REVOKE SELECT ON TABLES FROM <role>;
 ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA public REVOKE SELECT ON TABLES FROM <role>;
 GRANT SELECT (<columns>) ON <table> TO <role>;
--- run through the connector; must be false for every sensitive table:
+```
+
+Then, through the connector, this must return `false` for every sensitive
+table:
+
+```sql
 SELECT has_table_privilege('<table>', 'SELECT');
 ```
+
+## Security model
+
+| Guard | What it does |
+|-------|--------------|
+| Google sign-in + allowlist | Only verified emails in `ALLOWED_EMAILS` get a token. The list is rechecked on every request, so removing an email locks that person out immediately. |
+| Token audience | Tokens are bound to `MCP_RESOURCE` and are refused by any other server. The Google access token is used once to read the email and is not stored. |
+| Read-only transaction | Each query runs in `BEGIN READ ONLY` and is always rolled back. A query cannot switch the transaction to read-write or lift its own timeout. |
+| Single statement | The extended query protocol makes Postgres reject multiple statements. |
+| Limits | 10s statement timeout, 5s connect timeout, 16,000-character SQL, 5,000 rows. |
+| Logs | Query strings are redacted from Workers logs. |
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| Sign-in fails with `invalid_target` | `MCP_RESOURCE` doesn't match the connector URL. Make them identical, then redeploy. |
+| "This Google account is not allowed" | Add the email to `ALLOWED_EMAILS` (`npx wrangler secret put ALLOWED_EMAILS`). |
+| `kv namespace create` says the title exists | Pick another title; any name works. |
+| `Database "<name>" is unreachable` | Check the host, port and password in the Hyperdrive config (`npx wrangler hyperdrive get <id>`). |
+| `Query failed: permission denied` | The role has no grant on that table or column. That's the role doing its job. |
 
 ## Development
 
 ```bash
-cp .dev.vars.example .dev.vars   # fill in; restart wrangler dev after edits
+cp .dev.vars.example .dev.vars   # fill it in; restart wrangler dev after edits
 npm test
 npm run type-check
-TEST_DATABASE_URL=postgres://... npx vitest run test/sql.integration.test.ts
-CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HD_<NAME>=postgres://... npx wrangler dev
 ```
 
-`wrangler dev` serves on port 8788, so the local MCP URL is
-`http://localhost:8788/mcp`.
-
-## Reporting security issues
-
-See [SECURITY.md](SECURITY.md).
+| Task | Command |
+|------|---------|
+| Integration tests against real Postgres | `TEST_DATABASE_URL=postgres://... npx vitest run test/sql.integration.test.ts` |
+| Run locally on `http://localhost:8788/mcp` | `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HD_<NAME>=postgres://... npx wrangler dev` |
 
 ## License
 
-[MIT](LICENSE). The OAuth plumbing is adapted from Cloudflare's
+[MIT](LICENSE). The OAuth code is adapted from Cloudflare's
 [remote-mcp-google-oauth](https://github.com/cloudflare/ai/tree/main/demos/remote-mcp-google-oauth)
 template (MIT); see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
