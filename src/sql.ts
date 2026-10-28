@@ -1,4 +1,5 @@
-import { Client, type QueryConfig } from "pg";
+import { Client } from "pg";
+import Cursor from "pg-cursor";
 
 export const MAX_SQL_LENGTH = 16000;
 export const MAX_ROWS = 5000;
@@ -34,16 +35,22 @@ export async function runReadonly(
 	} catch {
 		throw new UserFacingError(`Database "${database}" is unreachable`);
 	}
+	let cursor: Cursor<Record<string, unknown>> | undefined;
 	try {
 		await client.query("BEGIN READ ONLY");
 		await client.query(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`);
 		// Extended protocol makes Postgres reject more than one statement.
-		const result = await client.query({ text: sql, queryMode: "extended" } as QueryConfig);
-		return shapeResult(result.rows);
+		cursor = client.query(new Cursor<Record<string, unknown>>(sql));
+		// One row past the cap is enough for shapeResult to reject; reading further would buffer it all.
+		const rows = await cursor.read(MAX_ROWS + 1);
+		await cursor.close();
+		return shapeResult(rows);
 	} catch (error) {
 		if (error instanceof UserFacingError) throw error;
 		throw new UserFacingError(`Query failed: ${(error as Error).message}`);
 	} finally {
+		// An open portal would make ROLLBACK wait behind it.
+		await cursor?.close().catch(() => undefined);
 		await client.query("ROLLBACK").catch(() => undefined);
 		await client.end().catch(() => undefined);
 	}
