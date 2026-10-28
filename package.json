@@ -1,0 +1,38 @@
+{
+	"name": "readonly-postgres-mcp",
+	"version": "0.0.1",
+	"private": true,
+	"description": "Remote MCP server on Cloudflare Workers that runs read-only SQL against Postgres through Hyperdrive, behind a Google OAuth allowlist.",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/zahidakhyar/readonly-postgres-mcp.git"
+	},
+	"scripts": {
+		"deploy": "wrangler deploy",
+		"dev": "wrangler dev",
+		"start": "wrangler dev",
+		"cf-typegen": "wrangler types",
+		"type-check": "tsc --noEmit",
+		"test": "vitest run --maxWorkers=2",
+		"add-db": "tsx scripts/add-db.ts",
+		"remove-db": "tsx scripts/remove-db.ts"
+	},
+	"dependencies": {
+		"@cloudflare/workers-oauth-provider": "^1.2.4",
+		"@modelcontextprotocol/server": "2.3.1",
+		"agents": "^0.31.0",
+		"hono": "^4.12.27",
+		"pg": "^8.23.1",
+		"zod": "^4.4.3"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^5.20261006.1",
+		"@types/pg": "^8.23.1",
+		"jsonc-parser": "^3.3.1",
+		"tsx": "^4.23.15",
+		"typescript": "6.0.3",
+		"vitest": "^5.0.3",
+		"wrangler": "^4.150.0"
+	}
+}

@@ -1,0 +1,44 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ *
+ * Copy to wrangler.jsonc (gitignored) and fill in your own ids.
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "readonly-postgres-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-03-10",
+  "compatibility_flags": ["nodejs_compat"],
+  // The URL MCP clients connect to; every OAuth token is bound to it.
+  "vars": {
+    "MCP_RESOURCE": "https://readonly-postgres-mcp.<your-subdomain>.workers.dev/mcp"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "<your OAUTH_KV namespace id>"
+    }
+  ],
+  // Managed by `npm run add-db` / `npm run remove-db`.
+  "hyperdrive": [],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "redact_query_string": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "persist": true
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "persist": true
+    }
+  },
+  "dev": {
+    "port": 8788
+  }
+}
