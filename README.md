@@ -35,6 +35,9 @@ flowchart LR
 |------|-------|---------|
 | `list_databases` | none | `{ databases: string[] }` |
 | `execute_sql_readonly` | `{ database, sql }` | `{ rows, rowCount }` |
+| `describe_schema` | `{ database, schema?, table? }` | `{ tables }` or one table's `columns`, `primaryKey`, `foreignKeys` |
+
+`describe_schema` only shows the tables and columns the database role can SELECT.
 
 Each query is limited to one statement of up to 16,000 characters, a 10s
 statement timeout and 5,000 result rows. Results come back both as JSON text

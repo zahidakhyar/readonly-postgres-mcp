@@ -31,6 +31,7 @@ export async function runReadonly(
 	database: string,
 	connectionString: string,
 	sql: string,
+	values?: unknown[],
 ): Promise<QueryResult> {
 	validateSql(sql);
 	const client = new Client({ connectionString, connectionTimeoutMillis: CONNECT_TIMEOUT_MS });
@@ -46,7 +47,7 @@ export async function runReadonly(
 		await client.query(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`);
 		// Extended protocol makes Postgres reject more than one statement.
 		// No portal row limit or cursor: Hyperdrive drops the connection on PortalSuspended and on named portals.
-		const config: ExtendedQueryConfig = { text: sql, queryMode: "extended" };
+		const config: ExtendedQueryConfig = { text: sql, values, queryMode: "extended" };
 		const query = client.query(new Query<Row>(config));
 		const rows = await new Promise<Row[]>((resolve, reject) => {
 			const collected: Row[] = [];
