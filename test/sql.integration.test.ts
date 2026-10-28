@@ -18,6 +18,30 @@ describe.skipIf(!url)("runReadonly against Postgres", () => {
 		expect(await run("select 1 as n where false")).toEqual({ rows: [], rowCount: 0 });
 	});
 
+	it("refuses a huge result without reading all of it", async () => {
+		const started = Date.now();
+		// generate_series in the select list streams; in FROM it would materialize all 10M rows server-side first.
+		await expect(run("select generate_series(1, 10000000) as g")).rejects.toThrow(
+			"Result has more than 5000 rows; aggregate in SQL",
+		);
+		expect(Date.now() - started).toBeLessThan(3_000);
+	}, 15_000);
+
+	it("returns exactly MAX_ROWS rows", async () => {
+		expect((await run("select g from generate_series(1, 5000) g")).rowCount).toBe(5000);
+	});
+
+	it("runs row-returning statements that are not SELECT", async () => {
+		expect((await run("explain select 1")).rowCount).toBeGreaterThan(0);
+		expect(await run("show statement_timeout")).toEqual({ rows: [{ statement_timeout: "10s" }], rowCount: 1 });
+	});
+
+	it("surfaces an error raised mid-read as Query failed", async () => {
+		await expect(run("select 1 / (5000 - g) from generate_series(1, 10000) g")).rejects.toThrow(
+			/^Query failed: division by zero/,
+		);
+	});
+
 	it("rejects multiple statements", async () => {
 		await expect(run("select 1; select 2")).rejects.toThrow(/^Query failed: .*multiple commands/);
 	});

@@ -1,4 +1,5 @@
-import { Client, type QueryConfig } from "pg";
+import { Client } from "pg";
+import Cursor from "pg-cursor";
 
 export const MAX_SQL_LENGTH = 16000;
 export const MAX_ROWS = 5000;
@@ -38,8 +39,13 @@ export async function runReadonly(
 		await client.query("BEGIN READ ONLY");
 		await client.query(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT}'`);
 		// Extended protocol makes Postgres reject more than one statement.
-		const result = await client.query({ text: sql, queryMode: "extended" } as QueryConfig);
-		return shapeResult(result.rows);
+		const cursor = client.query(new Cursor<Record<string, unknown>>(sql));
+		// One row past the cap is enough for shapeResult to reject; reading further would buffer it all.
+		const rows = await cursor.read(MAX_ROWS + 1);
+		// An open portal would make ROLLBACK wait behind it. Not closed after a failed read: the error already
+		// sent Sync, ROLLBACK drops the portal, and on a dropped connection close() waits forever for readyForQuery.
+		await cursor.close();
+		return shapeResult(rows);
 	} catch (error) {
 		if (error instanceof UserFacingError) throw error;
 		throw new UserFacingError(`Query failed: ${(error as Error).message}`);
