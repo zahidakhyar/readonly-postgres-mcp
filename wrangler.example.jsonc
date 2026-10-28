@@ -10,6 +10,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-03-10",
   "compatibility_flags": ["nodejs_compat"],
+  // Run near the database: every tool call makes several round trips to Postgres.
+  "placement": { "mode": "smart" },
   // The URL MCP clients connect to; every OAuth token is bound to it.
   "vars": {
     "MCP_RESOURCE": "https://readonly-postgres-mcp.<your-subdomain>.workers.dev/mcp"
